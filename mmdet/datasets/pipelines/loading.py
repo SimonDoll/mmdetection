@@ -7,6 +7,9 @@ import pycocotools.mask as maskUtils
 from mmdet.core import BitmapMasks, PolygonMasks
 from ..builder import PIPELINES
 
+import imgaug as ia
+import imgaug.augmenters as iaa
+
 
 @PIPELINES.register_module()
 class LoadImageFromFile(object):
@@ -456,3 +459,78 @@ class FilterAnnotations(object):
                 if key in results:
                     results[key] = results[key][keep]
             return results
+
+
+@PIPELINES.register_module()
+class ImageAugmentationPipeline:
+    """Color based image augmentation pipeline.
+        Applies blur (gaus, median), shapren, contrast, grayscale  overlay, hsv colorspace"""
+
+    def __init__(
+            self, sometimes_prob=0.5, someof_range=(0, 3)):
+
+        def sometimes(aug): return iaa.Sometimes(sometimes_prob, aug)
+        # define the sequence of augmentation strageties
+
+        self._pipeline = sometimes(
+            iaa.SomeOf(someof_range,
+                       [
+                           # converts to HSV
+                           # alters Hue in range -50,50°
+                           # multiplies saturation
+                           # converts back
+                           iaa.WithHueAndSaturation([
+                               iaa.WithChannels(0, iaa.Add((-50, 50))),
+                               iaa.WithChannels(1, [
+                                   iaa.Multiply((0.5, 1.5)),
+                               ]),
+                           ]),
+                           # Sharpen each image, overlay the result with the original
+                           # image using an alpha between 0 (no sharpening) and 1
+                           # (full sharpening effect).
+                           iaa.Sharpen(alpha=(0, 1.0),
+                                       lightness=(0.75, 1.5)),
+
+                           # Improve or worsen the contrast of images.
+                           iaa.LinearContrast(
+                               (0.5, 1.5), per_channel=0.5),
+
+                           # Either drop randomly 1 to 10% of all pixels (i.e. set
+                           # them to black) or drop them on an image with 2-5% percent
+                           # of the original size, leading to large dropped
+                           # rectangles.
+                           # otherwise apply gaussian blur
+                           iaa.OneOf([
+                               iaa.Dropout((0.01, 0.1), per_channel=0.5),
+                               iaa.CoarseDropout(
+                                   (0.03, 0.15), size_percent=(0.02, 0.05),
+                                   per_channel=0.2
+                               ),
+                               # gaussian blur (sigma between 0 and 3.0),
+                               iaa.GaussianBlur((0, 3.0)),
+                           ]),
+
+                           # Add a value of -10 to 10 to each pixel.
+                           iaa.Add((-10, 10), per_channel=0.5),
+
+                           # Convert each image to grayscale and then overlay the
+                           # result with the original with random alpha. I.e. remove
+                           # colors with varying strengths.
+                           sometimes(iaa.Grayscale(alpha=(0.0, 1.0))),
+
+                       ],
+                       # do all of the above augmentations in random order
+                       random_order=True)
+
+        )
+
+    def __call__(self, results):
+        img = results['img']
+        augmented = self._pipeline.augment_image(img)
+        results['img'] = augmented
+        return results
+
+    def __repr__(self):
+        """str: Return a string that describes the module."""
+        return "".format(
+            self.__class__.__name__)
